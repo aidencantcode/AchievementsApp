@@ -2,10 +2,12 @@ package app.achievements
 
 import android.Manifest
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -83,9 +85,14 @@ fun App() {
         scope.launch {
             games = withContext(Dispatchers.IO) { Scanner.list(c, p) }
             loaded = true
-            val miss = games.filter { it.cover == null || it.hero == null }
+            val miss = games.filter { it.cover == null || it.hero == null || Net.needsMeta(it, p.steamKey) }
             if (miss.isNotEmpty()) {
-                withContext(Dispatchers.IO) { miss.forEach { Net.art(c, it, p.key) } }
+                withContext(Dispatchers.IO) {
+                    miss.forEach {
+                        Net.art(c, it, p.key)
+                        if (Net.needsMeta(it, p.steamKey)) Net.meta(c, it, p.steamKey)
+                    }
+                }
                 games = withContext(Dispatchers.IO) { Scanner.list(c, p) }
             }
         }
@@ -99,19 +106,26 @@ fun App() {
 
     val g = games.firstOrNull { it.dir.name == sel }
     when {
-        setup -> Form(p) { setup = false; sel = null; refresh() }
+        setup -> Form(p, games) { setup = false; sel = null; refresh() }
         g != null -> Detail(g) { sel = null }
         else -> Home(p, games, loaded, { sel = it }, { setup = true })
     }
 }
 
 @Composable
-fun Form(p: Prefs, done: () -> Unit) {
+fun Form(p: Prefs, games: List<Game>, done: () -> Unit) {
     val c = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val canDebug = remember { p.root.isNotBlank() && p.name.isNotBlank() }
     var name by remember { mutableStateOf(p.name) }
     var root by remember { mutableStateOf(p.root) }
     var key by remember { mutableStateOf(p.key) }
+    var skey by remember { mutableStateOf(p.steamKey) }
     var alerts by remember { mutableStateOf(p.alerts) }
+    var side by remember { mutableStateOf(p.popupSide) }
+    var secs by remember { mutableStateOf(p.popupSecs) }
+    var canDraw by remember { mutableStateOf(Settings.canDrawOverlays(c)) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { canDraw = Settings.canDrawOverlays(c) }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { u: Uri? ->
         if (u != null) {
             c.contentResolver.takePersistableUriPermission(
@@ -123,6 +137,9 @@ fun Form(p: Prefs, done: () -> Unit) {
     val perm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     val folder = if (root.isBlank()) "Choose folder" else (DocumentFile.fromTreeUri(c, Uri.parse(root))?.name ?: "Folder selected")
     val ready = name.isNotBlank() && root.isNotBlank()
+    fun askOverlay() {
+        c.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + c.packageName)))
+    }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 28.dp, vertical = 48.dp)) {
         Text("Achievements", fontSize = 30.sp, fontWeight = FontWeight.SemiBold)
@@ -141,6 +158,9 @@ fun Form(p: Prefs, done: () -> Unit) {
         Label("SteamGridDB key (optional)")
         Field(key, "Used for cover art") { key = it }
         Spacer(Modifier.height(24.dp))
+        Label("Steam Web API key (optional)")
+        Field(skey, "Used for icons and descriptions") { skey = it }
+        Spacer(Modifier.height(24.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("Alert me when I earn one", fontSize = 15.sp)
@@ -151,11 +171,46 @@ fun Form(p: Prefs, done: () -> Unit) {
                 colors = SwitchDefaults.colors(checkedTrackColor = cAc, checkedThumbColor = cBg, uncheckedTrackColor = cHi, uncheckedThumbColor = cMu, uncheckedBorderColor = cHi)
             )
         }
+        if (canDebug) {
+            Spacer(Modifier.height(36.dp))
+            Text("Debug", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(18.dp))
+            Label("Pop-up slides in from")
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("top", "bottom", "left", "right").forEach { s ->
+                    Chip(s.replaceFirstChar { it.uppercase() }, side == s) { side = s; p.popupSide = s }
+                }
+            }
+            Spacer(Modifier.height(20.dp))
+            Label("Stays visible for")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Chip("-", false) { if (secs > 1) { secs--; p.popupSecs = secs } }
+                Text("$secs s", fontSize = 15.sp, modifier = Modifier.padding(horizontal = 18.dp))
+                Chip("+", false) { if (secs < 15) { secs++; p.popupSecs = secs } }
+            }
+            Spacer(Modifier.height(20.dp))
+            if (!canDraw) {
+                Text("Pop-ups over games need the \"display over other apps\" permission.", fontSize = 13.sp, color = cMu)
+                Spacer(Modifier.height(10.dp))
+                Chip("Allow display over other apps", false) { askOverlay() }
+                Spacer(Modifier.height(20.dp))
+            }
+            Chip("Test pop-up", false) {
+                if (!canDraw) askOverlay() else scope.launch(Dispatchers.IO) {
+                    val g = games.firstOrNull { it.earned > 0 }
+                    val a = g?.achs?.firstOrNull { it.earned }
+                    val bmp = a?.icon?.let {
+                        try { c.contentResolver.openInputStream(it)?.use { s -> BitmapFactory.decodeStream(s) } } catch (e: Exception) { null }
+                    }
+                    Popup.show(c.applicationContext, p, a?.name ?: "Slice 'n Dice", a?.desc ?: "Defeated Bazz", g?.title ?: "EX Zodiac", bmp)
+                }
+            }
+        }
         Spacer(Modifier.height(40.dp))
         Box(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(if (ready) cAc else cHi)
                 .clickable(enabled = ready) {
-                    p.name = name.trim(); p.root = root; p.key = key.trim(); p.alerts = alerts
+                    p.name = name.trim(); p.root = root; p.key = key.trim(); p.steamKey = skey.trim(); p.alerts = alerts
                     val svc = Intent(c, WatchService::class.java)
                     if (alerts) {
                         if (Build.VERSION.SDK_INT >= 33) perm.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -166,6 +221,14 @@ fun Form(p: Prefs, done: () -> Unit) {
             contentAlignment = Alignment.Center
         ) { Text("Continue", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = if (ready) cBg else cMu) }
     }
+}
+
+@Composable
+private fun Chip(t: String, on: Boolean, click: () -> Unit) {
+    Box(
+        Modifier.clip(RoundedCornerShape(10.dp)).background(if (on) cAc else cSf)
+            .clickable { click() }.padding(horizontal = 16.dp, vertical = 10.dp)
+    ) { Text(t, fontSize = 14.sp, color = if (on) cBg else cTx) }
 }
 
 @Composable
@@ -244,40 +307,73 @@ fun Detail(g: Game, back: () -> Unit) {
     val fmt = remember { DateFormat.getDateInstance(DateFormat.MEDIUM) }
     val list = remember(g) { g.achs.sortedWith(compareByDescending<Ach> { it.earned }.thenByDescending { it.time }) }
     val gray = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
-    LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
-        item {
-            Box(Modifier.fillMaxWidth().height(200.dp).background(cSf)) {
-                AsyncImage(g.hero, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, cBg))))
-                Text("Back", fontSize = 14.sp, modifier = Modifier.align(Alignment.TopStart).padding(12.dp).clickable { back() }.padding(8.dp))
-                Column(Modifier.align(Alignment.BottomStart).padding(20.dp)) {
-                    Text(g.title, fontSize = 24.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
-                    Spacer(Modifier.height(4.dp))
-                    Text("${g.earned} of ${g.achs.size} earned", fontSize = 14.sp, color = cMu)
+    var open by remember { mutableStateOf<Ach?>(null) }
+    BackHandler(open != null) { open = null }
+    Box(Modifier.fillMaxSize()) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
+            item {
+                Box(Modifier.fillMaxWidth().height(200.dp).background(cSf)) {
+                    AsyncImage(g.hero, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, cBg))))
+                    Text("Back", fontSize = 14.sp, modifier = Modifier.align(Alignment.TopStart).padding(12.dp).clickable { back() }.padding(8.dp))
+                    Column(Modifier.align(Alignment.BottomStart).padding(20.dp)) {
+                        Text(g.title, fontSize = 24.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
+                        Spacer(Modifier.height(4.dp))
+                        Text("${g.earned} of ${g.achs.size} earned", fontSize = 14.sp, color = cMu)
+                    }
+                }
+            }
+            item { Box(Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) { Bar(g.earned, g.achs.size) } }
+            items(list, key = { it.id }) { a ->
+                val hide = a.hidden && !a.earned
+                Row(
+                    Modifier.fillMaxWidth().clickable { open = a }.padding(horizontal = 20.dp, vertical = 10.dp)
+                        .alpha(if (a.earned) 1f else 0.55f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AsyncImage(
+                        if (hide) null else a.icon, null, contentScale = ContentScale.Crop,
+                        colorFilter = if (a.earned) null else gray,
+                        modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(cHi)
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(if (hide) "Hidden achievement" else a.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Text(if (hide) "Earn it to see what it is." else a.desc, fontSize = 13.sp, color = cMu, maxLines = 2)
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column(horizontalAlignment = Alignment.End) {
+                        a.percent?.let { Text("%.1f%%".format(it), fontSize = 13.sp, fontWeight = FontWeight.SemiBold) }
+                        if (a.earned && a.time > 0) Text(fmt.format(Date(a.time * 1000)), fontSize = 11.sp, color = cMu)
+                    }
                 }
             }
         }
-        item { Box(Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) { Bar(g.earned, g.achs.size) } }
-        items(list, key = { it.id }) { a ->
+        open?.let { a ->
             val hide = a.hidden && !a.earned
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp).alpha(if (a.earned) 1f else 0.55f),
-                verticalAlignment = Alignment.CenterVertically
+            Box(Modifier.fillMaxSize().background(Color(0x99000000)).clickable { open = null })
+            Column(
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)).background(cSf)
+                    .clickable { }.padding(24.dp)
             ) {
-                AsyncImage(
-                    if (hide) null else a.icon, null, contentScale = ContentScale.Crop,
-                    colorFilter = if (a.earned) null else gray,
-                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(cHi)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    AsyncImage(
+                        if (hide) null else a.icon, null, contentScale = ContentScale.Crop,
+                        colorFilter = if (a.earned) null else gray,
+                        modifier = Modifier.size(64.dp).clip(RoundedCornerShape(12.dp)).background(cHi)
+                    )
+                    Spacer(Modifier.width(16.dp))
+                    Text(if (hide) "Hidden achievement" else a.name, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                }
+                Spacer(Modifier.height(16.dp))
+                Text(if (hide) "Earn it to see what it is." else a.desc.ifBlank { "No description available." }, fontSize = 15.sp)
+                Spacer(Modifier.height(16.dp))
+                a.percent?.let { Text("%.1f%% of players have this".format(it), fontSize = 13.sp, color = cMu) }
+                Text(
+                    if (a.earned && a.time > 0) "Earned on " + fmt.format(Date(a.time * 1000)) else if (a.earned) "Earned" else "Not earned yet",
+                    fontSize = 13.sp, color = cMu
                 )
-                Spacer(Modifier.width(14.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(if (hide) "Hidden achievement" else a.name, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                    Text(if (hide) "Earn it to see what it is." else a.desc, fontSize = 13.sp, color = cMu)
-                }
-                if (a.earned && a.time > 0) {
-                    Spacer(Modifier.width(10.dp))
-                    Text(fmt.format(Date(a.time * 1000)), fontSize = 12.sp, color = cMu)
-                }
             }
         }
     }

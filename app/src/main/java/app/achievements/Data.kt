@@ -19,19 +19,29 @@ class Prefs(c: Context) {
     var key: String
         get() = sp.getString("key", "") ?: ""
         set(v) { sp.edit().putString("key", v).apply() }
+    var steamKey: String
+        get() = sp.getString("skey", "") ?: ""
+        set(v) { sp.edit().putString("skey", v).apply() }
     var alerts: Boolean
         get() = sp.getBoolean("alerts", true)
         set(v) { sp.edit().putBoolean("alerts", v).apply() }
+    var popupSide: String
+        get() = sp.getString("pside", "top") ?: "top"
+        set(v) { sp.edit().putString("pside", v).apply() }
+    var popupSecs: Int
+        get() = sp.getInt("psecs", 4)
+        set(v) { sp.edit().putInt("psecs", v).apply() }
 }
 
 data class Ach(
     val id: String, val name: String, val desc: String, val hidden: Boolean,
-    val icon: Uri?, val earned: Boolean, val time: Long
+    val icon: Uri?, val earned: Boolean, val time: Long, val percent: Double?
 )
 
 data class Game(
     val dir: DocumentFile, val appId: String, val title: String, val achs: List<Ach>,
-    val progress: DocumentFile?, val cover: Uri?, val hero: Uri?
+    val progress: DocumentFile?, val cover: Uri?, val hero: Uri?,
+    val metaAt: Long, val metaSchema: Boolean
 ) {
     val earned: Int get() = achs.count { it.earned }
 }
@@ -76,23 +86,34 @@ object Scanner {
         val st = kids["steam_settings"]?.listFiles()?.associateBy { it.name } ?: return null
         val defs = JSONArray(st["achievements.json"]?.let { text(c, it) } ?: return null)
         val imgs = st["images"]?.listFiles()?.associate { (it.name ?: "") to it.uri } ?: emptyMap()
+        val icons = kids["icons"]?.listFiles()?.associate { (it.name ?: "") to it.uri } ?: emptyMap()
+        val meta = try { kids["meta.json"]?.let { text(c, it) }?.let { JSONObject(it) } } catch (e: Exception) { null }
+        val metaAch = meta?.optJSONObject("ach")
         val progressDoc = kids["achievements.json"]
         val earned = progress(c, progressDoc) ?: emptyMap()
         val achs = (0 until defs.length()).map {
             val o = defs.getJSONObject(it)
             val id = o.optString("name")
+            val mo = metaAch?.optJSONObject(id)
+            val icon = imgs[o.optString("icon").substringAfterLast('/')]
+                ?: mo?.optString("i")?.takeIf { s -> s.isNotBlank() }?.let { s -> icons[s] }
             Ach(
-                id, str(o, "displayName").ifBlank { id }, str(o, "description"),
+                id,
+                str(o, "displayName").ifBlank { mo?.optString("n")?.takeIf { s -> s.isNotBlank() } ?: id },
+                str(o, "description").ifBlank { mo?.optString("d") ?: "" },
                 o.opt("hidden")?.toString() in listOf("1", "true"),
-                imgs[o.optString("icon").substringAfterLast('/')],
-                id in earned, earned[id] ?: 0L
+                icon, id in earned, earned[id] ?: 0L,
+                mo?.optDouble("p", -1.0)?.takeIf { d -> d >= 0 }
             )
         }
         val folder = dir.name ?: ""
         val m = Regex("^(\\d+)\\s*[-_.]?\\s*(.*)$").find(folder)
         val appId = m?.groupValues?.get(1) ?: ""
         val title = m?.groupValues?.get(2)?.ifBlank { null } ?: folder
-        return Game(dir, appId, title, achs, progressDoc, kids["cover.jpg"]?.uri, kids["hero.jpg"]?.uri)
+        return Game(
+            dir, appId, title, achs, progressDoc, kids["cover.jpg"]?.uri, kids["hero.jpg"]?.uri,
+            meta?.optLong("at") ?: 0L, meta?.optBoolean("s") ?: false
+        )
     }
 }
 
@@ -113,7 +134,8 @@ object Net {
 
     private fun save(c: Context, dir: DocumentFile, name: String, bytes: ByteArray) {
         dir.findFile(name)?.delete()
-        val f = dir.createFile("image/jpeg", name.removeSuffix(".jpg")) ?: return
+        val json = name.endsWith(".json")
+        val f = dir.createFile(if (json) "application/json" else "image/jpeg", if (json) name else name.removeSuffix(".jpg")) ?: return
         c.contentResolver.openOutputStream(f.uri)?.use { it.write(bytes) }
     }
 
@@ -131,5 +153,54 @@ object Net {
                 ?: get(cdn + "library_hero.jpg")
             b?.let { save(c, g.dir, "hero.jpg", it) }
         }
+    }
+
+    fun needsMeta(g: Game, steamKey: String): Boolean =
+        g.appId.isNotBlank() && (g.metaAt == 0L || System.currentTimeMillis() - g.metaAt > 7 * 86400000L ||
+            (steamKey.isNotBlank() && !g.metaSchema))
+
+    // Global unlock percentages (no key needed). With a Steam Web API key: names, descriptions and icons too.
+    // Everything is saved to meta.json and icons/ inside the game's folder.
+    fun meta(c: Context, g: Game, steamKey: String) {
+        val ach = JSONObject()
+        fun slot(id: String): JSONObject = ach.optJSONObject(id) ?: JSONObject().also { ach.put(id, it) }
+        var gotPct = false
+        get("https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002/?gameid=${g.appId}&format=json")?.let { b ->
+            try {
+                val a = JSONObject(String(b)).getJSONObject("achievementpercentages").getJSONArray("achievements")
+                for (i in 0 until a.length()) {
+                    val o = a.getJSONObject(i)
+                    slot(o.getString("name")).put("p", o.optDouble("percent"))
+                }
+                gotPct = true
+            } catch (e: Exception) { }
+        }
+        var schema = false
+        if (steamKey.isNotBlank()) {
+            get("https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?key=$steamKey&appid=${g.appId}&l=english")?.let { b ->
+                try {
+                    val a = JSONObject(String(b)).getJSONObject("game").getJSONObject("availableGameStats").getJSONArray("achievements")
+                    val icons = g.dir.findFile("icons") ?: g.dir.createDirectory("icons")
+                    for (i in 0 until a.length()) {
+                        val o = a.getJSONObject(i)
+                        val id = o.getString("name")
+                        val s = slot(id)
+                        s.put("n", o.optString("displayName"))
+                        s.put("d", o.optString("description"))
+                        val url = o.optString("icon")
+                        if (url.isNotBlank() && icons != null) {
+                            val fn = "icon_" + id.replace(Regex("[^A-Za-z0-9_.-]"), "_") + ".jpg"
+                            if (icons.findFile(fn) == null) get(url)?.let { bytes -> save(c, icons, fn, bytes) }
+                            s.put("i", fn)
+                        }
+                    }
+                    schema = true
+                } catch (e: Exception) { }
+            }
+        }
+        if (!gotPct && !schema) return
+        if (!schema && g.metaSchema) return // keep the richer file we already have
+        val root = JSONObject().put("at", System.currentTimeMillis()).put("s", schema).put("ach", ach)
+        save(c, g.dir, "meta.json", root.toString().toByteArray())
     }
 }

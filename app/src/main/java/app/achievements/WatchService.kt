@@ -9,11 +9,13 @@ import android.content.pm.ServiceInfo
 import android.graphics.BitmapFactory
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import kotlinx.coroutines.*
 
 class WatchService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
+    private val prefs by lazy { Prefs(this) }
 
     override fun onBind(i: Intent?): IBinder? = null
 
@@ -63,6 +65,10 @@ class WatchService : Service() {
     private fun unlocked(g: Game, a: Ach) {
         val bmp = a.icon?.let {
             try { contentResolver.openInputStream(it)?.use { s -> BitmapFactory.decodeStream(s) } } catch (e: Exception) { null }
+        }
+        if (Settings.canDrawOverlays(this)) {
+            Popup.show(applicationContext, prefs, a.name, a.desc, g.title, bmp)
+            return
         }
         val b = Notification.Builder(this, "unlock")
             .setSmallIcon(android.R.drawable.star_on)
