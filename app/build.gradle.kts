@@ -9,8 +9,20 @@ android {
         applicationId = "app.achievements"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = (project.findProperty("appVersionCode") as String?)?.toIntOrNull() ?: 1
+        versionName = (project.findProperty("appVersionName") as String?) ?: "1.0.0"
+    }
+    // One fixed key for every build, so each new release installs over the previous one.
+    signingConfigs {
+        create("fixed") {
+            storeFile = file("release-key.jks")
+            storePassword = "android"
+            keyAlias = "achievements"
+            keyPassword = "android"
+        }
+    }
+    buildTypes {
+        getByName("debug") { signingConfig = signingConfigs.getByName("fixed") }
     }
     buildFeatures { compose = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }

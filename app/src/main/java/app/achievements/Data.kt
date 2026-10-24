@@ -22,6 +22,24 @@ class Prefs(c: Context) {
     var steamKey: String
         get() = sp.getString("skey", "") ?: ""
         set(v) { sp.edit().putString("skey", v).apply() }
+    var popupRadius: Int
+        get() = sp.getInt("pr", 18)
+        set(v) { sp.edit().putInt("pr", v).apply() }
+    var popupBlur: Int
+        get() = sp.getInt("pb", 24)
+        set(v) { sp.edit().putInt("pb", v).apply() }
+    var popupOpacity: Int
+        get() = sp.getInt("po", 60)
+        set(v) { sp.edit().putInt("po", v).apply() }
+    var popupScale: Int
+        get() = sp.getInt("pscale", 100)
+        set(v) { sp.edit().putInt("pscale", v).apply() }
+    var popupStyle: String
+        get() = sp.getString("pstyle", "liquid") ?: "liquid"
+        set(v) { sp.edit().putString("pstyle", v).apply() }
+    var sfxOn: Boolean
+        get() = sp.getBoolean("sfx", true)
+        set(v) { sp.edit().putBoolean("sfx", v).apply() }
     var gamesRoot: String
         get() = sp.getString("groot", "") ?: ""
         set(v) { sp.edit().putString("groot", v).apply() }

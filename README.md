@@ -2,10 +2,10 @@
 
 Viewer and background alerts for gbe_fork achievements.
 
-## Build
+## Build and release
 1. Create a GitHub repo and push this folder's contents (the `.github` folder must be at the repo root).
-2. Open the Actions tab, run "Build APK" (it also runs on every push).
-3. Download `Achievements-debug-apk` from the run, unzip, and install the APK.
+2. Every push to main builds the app and publishes a release named `v1.0.<build number>` with the APK attached.
+3. Open the repo's Releases page, download the APK, and install it. Each release installs over the last one.
 
 ## Folder layout (point the app at the top folder)
 ```
