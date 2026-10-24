@@ -7,6 +7,7 @@ import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -77,6 +78,7 @@ fun App() {
     var games by remember { mutableStateOf(emptyList<Game>()) }
     var setup by remember { mutableStateOf(p.root.isBlank() || p.name.isBlank()) }
     var sel by remember { mutableStateOf<String?>(null) }
+    var adding by remember { mutableStateOf(false) }
     var loaded by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
@@ -107,8 +109,9 @@ fun App() {
     val g = games.firstOrNull { it.dir.name == sel }
     when {
         setup -> Form(p, games) { setup = false; sel = null; refresh() }
-        g != null -> Detail(g) { sel = null }
-        else -> Home(p, games, loaded, { sel = it }, { setup = true })
+        adding -> AddGame(p, { adding = false }) { adding = false; refresh() }
+        g != null -> Detail(g, p, { sel = null }) { refresh() }
+        else -> Home(p, games, loaded, { sel = it }, { setup = true }, { adding = true })
     }
 }
 
@@ -125,7 +128,19 @@ fun Form(p: Prefs, games: List<Game>, done: () -> Unit) {
     var side by remember { mutableStateOf(p.popupSide) }
     var secs by remember { mutableStateOf(p.popupSecs) }
     var canDraw by remember { mutableStateOf(Settings.canDrawOverlays(c)) }
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { canDraw = Settings.canDrawOverlays(c) }
+    var ignoring by remember { mutableStateOf(c.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(c.packageName)) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        canDraw = Settings.canDrawOverlays(c)
+        ignoring = c.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(c.packageName)
+    }
+    var groot by remember { mutableStateOf(p.gamesRoot) }
+    val pickG = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { u: Uri? ->
+        if (u != null) {
+            c.contentResolver.takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            groot = u.toString()
+        }
+    }
+    val gfolder = if (groot.isBlank()) "Choose games folder" else (DocumentFile.fromTreeUri(c, Uri.parse(groot))?.name ?: "Folder selected")
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { u: Uri? ->
         if (u != null) {
             c.contentResolver.takePersistableUriPermission(
@@ -137,6 +152,9 @@ fun Form(p: Prefs, games: List<Game>, done: () -> Unit) {
     val perm = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     val folder = if (root.isBlank()) "Choose folder" else (DocumentFile.fromTreeUri(c, Uri.parse(root))?.name ?: "Folder selected")
     val ready = name.isNotBlank() && root.isNotBlank()
+    fun askBattery() {
+        c.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:" + c.packageName)))
+    }
     fun askOverlay() {
         c.startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + c.packageName)))
     }
@@ -155,11 +173,17 @@ fun Form(p: Prefs, games: List<Game>, done: () -> Unit) {
                 .clickable { pick.launch(null) }.padding(16.dp)
         ) { Text(folder, fontSize = 15.sp, color = if (root.isBlank()) cMu else cTx) }
         Spacer(Modifier.height(24.dp))
+        Label("Games folder (optional, for one-tap setup)")
+        Box(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(cSf)
+                .clickable { pickG.launch(null) }.padding(16.dp)
+        ) { Text(gfolder, fontSize = 15.sp, color = if (groot.isBlank()) cMu else cTx) }
+        Spacer(Modifier.height(24.dp))
         Label("SteamGridDB key (optional)")
         Field(key, "Used for cover art") { key = it }
         Spacer(Modifier.height(24.dp))
         Label("Steam Web API key (optional)")
-        Field(skey, "Used for icons and descriptions") { skey = it }
+        Field(skey, "Not needed, icons come from Steam's public page") { skey = it }
         Spacer(Modifier.height(24.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -170,6 +194,12 @@ fun Form(p: Prefs, games: List<Game>, done: () -> Unit) {
                 checked = alerts, onCheckedChange = { alerts = it },
                 colors = SwitchDefaults.colors(checkedTrackColor = cAc, checkedThumbColor = cBg, uncheckedTrackColor = cHi, uncheckedThumbColor = cMu, uncheckedBorderColor = cHi)
             )
+        }
+        if (alerts && !ignoring) {
+            Spacer(Modifier.height(18.dp))
+            Text("Android may close the app in the background. Allow it to keep running.", fontSize = 13.sp, color = cMu)
+            Spacer(Modifier.height(10.dp))
+            Chip("Allow background running", false) { askBattery() }
         }
         if (canDebug) {
             Spacer(Modifier.height(36.dp))
@@ -210,11 +240,12 @@ fun Form(p: Prefs, games: List<Game>, done: () -> Unit) {
         Box(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(if (ready) cAc else cHi)
                 .clickable(enabled = ready) {
-                    p.name = name.trim(); p.root = root; p.key = key.trim(); p.steamKey = skey.trim(); p.alerts = alerts
+                    p.name = name.trim(); p.root = root; p.gamesRoot = groot; p.key = key.trim(); p.steamKey = skey.trim(); p.alerts = alerts
                     val svc = Intent(c, WatchService::class.java)
                     if (alerts) {
                         if (Build.VERSION.SDK_INT >= 33) perm.launch(Manifest.permission.POST_NOTIFICATIONS)
                         c.startForegroundService(svc)
+                        if (!ignoring) askBattery()
                     } else c.stopService(svc)
                     done()
                 }.padding(16.dp),
@@ -257,7 +288,7 @@ private fun Bar(a: Int, b: Int) {
 }
 
 @Composable
-fun Home(p: Prefs, games: List<Game>, loaded: Boolean, open: (String) -> Unit, settings: () -> Unit) {
+fun Home(p: Prefs, games: List<Game>, loaded: Boolean, open: (String) -> Unit, settings: () -> Unit, add: () -> Unit) {
     val total = games.sumOf { it.achs.size }
     val got = games.sumOf { it.earned }
     LazyColumn(
@@ -271,6 +302,7 @@ fun Home(p: Prefs, games: List<Game>, loaded: Boolean, open: (String) -> Unit, s
                     Spacer(Modifier.height(4.dp))
                     Text("$got of $total achievements across ${games.size} games", fontSize = 14.sp, color = cMu)
                 }
+                Text("Add game", fontSize = 14.sp, color = cAc, modifier = Modifier.clickable { add() }.padding(8.dp))
                 Text("Settings", fontSize = 14.sp, color = cAc, modifier = Modifier.clickable { settings() }.padding(8.dp))
             }
         }
@@ -303,12 +335,29 @@ fun Home(p: Prefs, games: List<Game>, loaded: Boolean, open: (String) -> Unit, s
 }
 
 @Composable
-fun Detail(g: Game, back: () -> Unit) {
+fun Detail(g: Game, p: Prefs, back: () -> Unit, refresh: () -> Unit) {
+    val c = LocalContext.current
+    val scope = rememberCoroutineScope()
     val fmt = remember { DateFormat.getDateInstance(DateFormat.MEDIUM) }
     val list = remember(g) { g.achs.sortedWith(compareByDescending<Ach> { it.earned }.thenByDescending { it.time }) }
     val gray = ColorFilter.colorMatrix(ColorMatrix().apply { setToSaturation(0f) })
     var open by remember { mutableStateOf<Ach?>(null) }
-    BackHandler(open != null) { open = null }
+    var menu by remember { mutableStateOf(false) }
+    var gtype by remember { mutableStateOf(p.read("gbe_" + g.appId).ifBlank { "regular" }) }
+    var busy by remember { mutableStateOf(false) }
+    val log = remember { mutableStateListOf<String>() }
+    BackHandler(open != null || menu) { if (open != null) open = null else menu = false }
+
+    fun runJob(job: (log: (String) -> Unit) -> Unit) {
+        if (busy) return
+        busy = true; log.clear()
+        scope.launch(Dispatchers.IO) {
+            val say = { s: String -> scope.launch(Dispatchers.Main) { log.add(s) }; Unit }
+            try { job(say) } catch (e: Exception) { say("Failed: " + (e.message ?: e.toString())) }
+            withContext(Dispatchers.Main) { busy = false; refresh() }
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
             item {
@@ -316,6 +365,7 @@ fun Detail(g: Game, back: () -> Unit) {
                     AsyncImage(g.hero, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, cBg))))
                     Text("Back", fontSize = 14.sp, modifier = Modifier.align(Alignment.TopStart).padding(12.dp).clickable { back() }.padding(8.dp))
+                    Text("\u2630", fontSize = 20.sp, modifier = Modifier.align(Alignment.TopEnd).padding(12.dp).clickable { menu = true }.padding(8.dp))
                     Column(Modifier.align(Alignment.BottomStart).padding(20.dp)) {
                         Text(g.title, fontSize = 24.sp, fontWeight = FontWeight.SemiBold, maxLines = 2)
                         Spacer(Modifier.height(4.dp))
@@ -374,6 +424,139 @@ fun Detail(g: Game, back: () -> Unit) {
                     if (a.earned && a.time > 0) "Earned on " + fmt.format(Date(a.time * 1000)) else if (a.earned) "Earned" else "Not earned yet",
                     fontSize = 13.sp, color = cMu
                 )
+            }
+        }
+        if (menu) {
+            Box(Modifier.fillMaxSize().background(Color(0x99000000)).clickable { if (!busy) menu = false })
+            Column(
+                Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)).background(cSf)
+                    .clickable { }.padding(24.dp).verticalScroll(rememberScrollState())
+            ) {
+                Text("Game options", fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(18.dp))
+                Label("Emulator build")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Chip("Regular", gtype == "regular") { gtype = "regular" }
+                    Chip("Experimental", gtype == "experimental") { gtype = "experimental" }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text("Experimental adds the in-game overlay and may crash some games.", fontSize = 12.sp, color = cMu)
+                Spacer(Modifier.height(18.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Chip("Apply build", false) {
+                        val gd = p.read("gdir_" + g.appId)
+                        if (gd.isBlank()) { log.clear(); log.add("No game folder is linked yet. Use Add game first.") }
+                        else runJob { say ->
+                            val dir = DocumentFile.fromTreeUri(c, Uri.parse(gd)) ?: error("Can't open the game folder.")
+                            Gbe.install(c, p, dir, g.appId, g.title, gtype, say)
+                            p.write("gbe_" + g.appId, gtype)
+                        }
+                    }
+                    Chip("Rescrape achievements", false) { runJob { say -> Gbe.rescrape(c, p, g.appId, say) } }
+                }
+                Spacer(Modifier.height(14.dp))
+                Text("Your unlocked achievements are never changed by either action.", fontSize = 12.sp, color = cMu)
+                if (busy) Text("Working...", fontSize = 13.sp, modifier = Modifier.padding(top = 10.dp))
+                log.forEach { Text(it, fontSize = 12.sp, color = cMu, modifier = Modifier.padding(top = 4.dp)) }
+            }
+        }
+    }
+}
+
+@Composable
+fun AddGame(p: Prefs, back: () -> Unit, done: () -> Unit) {
+    val c = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var folders by remember { mutableStateOf<List<DocumentFile>?>(null) }
+    var picked by remember { mutableStateOf<DocumentFile?>(null) }
+    var results by remember { mutableStateOf<List<Pair<String, String>>?>(null) }
+    var chosen by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var manual by remember { mutableStateOf("") }
+    var type by remember { mutableStateOf("regular") }
+    var busy by remember { mutableStateOf(false) }
+    var ok by remember { mutableStateOf(false) }
+    val log = remember { mutableStateListOf<String>() }
+    BackHandler { if (!busy) { if (chosen != null) chosen = null else if (picked != null) picked = null else back() } }
+    LaunchedEffect(Unit) {
+        folders = withContext(Dispatchers.IO) {
+            if (p.gamesRoot.isBlank()) emptyList()
+            else (DocumentFile.fromTreeUri(c, Uri.parse(p.gamesRoot))?.listFiles() ?: emptyArray())
+                .filter { it.isDirectory }.sortedBy { it.name?.lowercase() }
+        }
+    }
+    LaunchedEffect(picked) {
+        val f = picked ?: return@LaunchedEffect
+        results = null
+        val q = (f.name ?: "").replace(Regex("[-_.]+"), " ").trim()
+        results = withContext(Dispatchers.IO) { Gbe.search(q) }
+    }
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
+        Text("Back", fontSize = 14.sp, modifier = Modifier.clickable { if (!busy) back() }.padding(vertical = 12.dp, horizontal = 4.dp))
+        Text("Add a game", fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(18.dp))
+        val ch = chosen
+        val pk = picked
+        when {
+            ch != null -> {
+                Text(ch.second, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Text("AppID ${ch.first}", fontSize = 13.sp, color = cMu)
+                Spacer(Modifier.height(20.dp))
+                Label("Emulator build")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Chip("Regular", type == "regular") { if (!busy) type = "regular" }
+                    Chip("Experimental", type == "experimental") { if (!busy) type = "experimental" }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text("Regular is the safe choice. Experimental adds the in-game overlay and may crash some games. You can switch later from the game's menu.", fontSize = 12.sp, color = cMu)
+                Spacer(Modifier.height(24.dp))
+                if (ok) Chip("Done", false) { done() }
+                else if (!busy) Chip("Set up", true) {
+                    busy = true; log.clear()
+                    scope.launch(Dispatchers.IO) {
+                        val say = { s: String -> scope.launch(Dispatchers.Main) { log.add(s) }; Unit }
+                        try {
+                            Gbe.install(c, p, pk!!, ch.first, ch.second, type, say)
+                            p.write("gbe_" + ch.first, type)
+                            withContext(Dispatchers.Main) { ok = true }
+                        } catch (e: Exception) { say("Failed: " + (e.message ?: e.toString())) }
+                        withContext(Dispatchers.Main) { busy = false }
+                    }
+                } else Text("Working...", fontSize = 14.sp)
+                log.forEach { Text(it, fontSize = 12.sp, color = cMu, modifier = Modifier.padding(top = 6.dp)) }
+            }
+            pk != null -> {
+                Text(pk.name ?: "", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(6.dp))
+                Text("Pick the matching Steam game.", fontSize = 13.sp, color = cMu)
+                Spacer(Modifier.height(14.dp))
+                val r = results
+                if (r == null) Text("Searching...", fontSize = 14.sp, color = cMu)
+                else r.forEach { it0 ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(12.dp)).background(cSf)
+                        .clickable { chosen = it0 }.padding(14.dp)) {
+                        Column { Text(it0.second, fontSize = 15.sp); Text("AppID ${it0.first}", fontSize = 12.sp, color = cMu) }
+                    }
+                }
+                Spacer(Modifier.height(18.dp))
+                Label("Not listed? Enter the AppID")
+                Field(manual, "e.g. 1249480") { manual = it.filter { ch2 -> ch2.isDigit() } }
+                Spacer(Modifier.height(10.dp))
+                if (manual.isNotBlank()) Chip("Use this AppID", false) { chosen = manual to (pk.name ?: manual) }
+            }
+            else -> {
+                val f = folders
+                if (p.gamesRoot.isBlank()) Text("Choose a games folder in Settings first.", fontSize = 14.sp, color = cMu)
+                else if (f == null) Text("Loading...", fontSize = 14.sp, color = cMu)
+                else if (f.isEmpty()) Text("No game folders found.", fontSize = 14.sp, color = cMu)
+                else {
+                    Text("Pick a game folder.", fontSize = 13.sp, color = cMu)
+                    Spacer(Modifier.height(10.dp))
+                    f.forEach { d ->
+                        Box(Modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(12.dp)).background(cSf)
+                            .clickable { picked = d }.padding(16.dp)) { Text(d.name ?: "", fontSize = 15.sp) }
+                    }
+                }
             }
         }
     }

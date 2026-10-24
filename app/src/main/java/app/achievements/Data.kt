@@ -22,6 +22,11 @@ class Prefs(c: Context) {
     var steamKey: String
         get() = sp.getString("skey", "") ?: ""
         set(v) { sp.edit().putString("skey", v).apply() }
+    var gamesRoot: String
+        get() = sp.getString("groot", "") ?: ""
+        set(v) { sp.edit().putString("groot", v).apply() }
+    fun read(k: String): String = sp.getString(k, "") ?: ""
+    fun write(k: String, v: String) { sp.edit().putString(k, v).apply() }
     var alerts: Boolean
         get() = sp.getBoolean("alerts", true)
         set(v) { sp.edit().putBoolean("alerts", v).apply() }
@@ -89,7 +94,9 @@ object Scanner {
         val icons = kids["icons"]?.listFiles()?.associate { (it.name ?: "") to it.uri } ?: emptyMap()
         val meta = try { kids["meta.json"]?.let { text(c, it) }?.let { JSONObject(it) } } catch (e: Exception) { null }
         val metaAch = meta?.optJSONObject("ach")
+        val appId0 = Regex("^(\\d+)").find(dir.name ?: "")?.groupValues?.get(1) ?: ""
         val progressDoc = kids["achievements.json"]
+            ?: kids[appId0]?.takeIf { it.isDirectory }?.findFile("achievements.json")
         val earned = progress(c, progressDoc) ?: emptyMap()
         val achs = (0 until defs.length()).map {
             val o = defs.getJSONObject(it)
@@ -109,7 +116,8 @@ object Scanner {
         val folder = dir.name ?: ""
         val m = Regex("^(\\d+)\\s*[-_.]?\\s*(.*)$").find(folder)
         val appId = m?.groupValues?.get(1) ?: ""
-        val title = m?.groupValues?.get(2)?.ifBlank { null } ?: folder
+        val title = kids["title.txt"]?.let { text(c, it) }?.trim()?.takeIf { it.isNotBlank() }
+            ?: m?.groupValues?.get(2)?.ifBlank { null } ?: folder
         return Game(
             dir, appId, title, achs, progressDoc, kids["cover.jpg"]?.uri, kids["hero.jpg"]?.uri,
             meta?.optLong("at") ?: 0L, meta?.optBoolean("s") ?: false
@@ -155,6 +163,40 @@ object Net {
         }
     }
 
+    private fun norm(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
+
+    private fun clean(s: String) = s.replace(Regex("<[^>]*>"), "")
+        .replace("&amp;", "&").replace("&quot;", "\"").replace("&#39;", "'")
+        .replace("&lt;", "<").replace("&gt;", ">").trim()
+
+    // Keyless fallback: Steam's public global-stats page lists every achievement with icon, name,
+    // description and percentage. Entries are matched to the definitions file by display name.
+    private fun page(c: Context, g: Game, ach: JSONObject): Boolean {
+        val html = get("https://steamcommunity.com/stats/${g.appId}/achievements?l=english")?.let { String(it) } ?: return false
+        val rows = html.split("class=\"achieveRow")
+        if (rows.size < 2) return false
+        val byName = g.achs.associateBy { norm(it.name) }
+        val icons = g.dir.findFile("icons") ?: g.dir.createDirectory("icons")
+        var hits = 0
+        for (r in rows.drop(1)) {
+            val n = Regex("<h3[^>]*>(.*?)</h3>", RegexOption.DOT_MATCHES_ALL).find(r)?.groupValues?.get(1)?.let { clean(it) } ?: continue
+            val a = byName[norm(n)] ?: continue
+            val desc = Regex("<h5[^>]*>(.*?)</h5>", RegexOption.DOT_MATCHES_ALL).find(r)?.groupValues?.get(1)?.let { clean(it) } ?: ""
+            val pct = Regex("achievePercent[^>]*>\\s*([0-9.]+)%").find(r)?.groupValues?.get(1)?.toDoubleOrNull()
+            val img = Regex("<img[^>]+src=\"([^\"]+)\"").find(r)?.groupValues?.get(1)
+            val s = ach.optJSONObject(a.id) ?: JSONObject().also { ach.put(a.id, it) }
+            if (desc.isNotBlank()) s.put("d", desc)
+            if (pct != null && !s.has("p")) s.put("p", pct)
+            if (img != null && icons != null) {
+                val fn = "icon_" + a.id.replace(Regex("[^A-Za-z0-9_.-]"), "_") + ".jpg"
+                if (icons.findFile(fn) == null) get(img)?.let { bytes -> save(c, icons, fn, bytes) }
+                s.put("i", fn)
+            }
+            hits++
+        }
+        return hits > 0
+    }
+
     fun needsMeta(g: Game, steamKey: String): Boolean =
         g.appId.isNotBlank() && (g.metaAt == 0L || System.currentTimeMillis() - g.metaAt > 7 * 86400000L ||
             (steamKey.isNotBlank() && !g.metaSchema))
@@ -198,7 +240,9 @@ object Net {
                 } catch (e: Exception) { }
             }
         }
-        if (!gotPct && !schema) return
+        var pageOk = false
+        if (!schema) pageOk = page(c, g, ach)
+        if (!gotPct && !schema && !pageOk) return
         if (!schema && g.metaSchema) return // keep the richer file we already have
         val root = JSONObject().put("at", System.currentTimeMillis()).put("s", schema).put("ach", ach)
         save(c, g.dir, "meta.json", root.toString().toByteArray())

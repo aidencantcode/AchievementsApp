@@ -42,7 +42,7 @@ class WatchService : Service() {
         var last = 0L
         while (currentCoroutineContext().isActive) {
             try {
-                if (System.currentTimeMillis() - last > 30000) {
+                if (System.currentTimeMillis() - last > 15000) {
                     games = Scanner.list(this, p); last = System.currentTimeMillis()
                 }
                 for (g in games) {
@@ -58,7 +58,7 @@ class WatchService : Service() {
                     if (old != null) for (a in g.achs) if (a.id in e.keys && a.id !in old) unlocked(g, a)
                 }
             } catch (e: Exception) { }
-            delay(2000)
+            delay(1000)
         }
     }
 
