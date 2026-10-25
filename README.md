@@ -19,3 +19,7 @@ Achievements/
 Set `local_save_path` in each game's `steam_settings/configs.user.ini` so gbe_fork writes
 progress into that game's folder. Cover art is downloaded into the same folder
 (`cover.jpg`, `hero.jpg`).
+
+## Notes
+- The gbe_fork emulator DLLs (regular and experimental, x86 and x64) are bundled in `app/src/main/assets/gbe`. Keep those files in the repo.
+- GitHub's web uploader rejects files over 25 MB. The largest DLL is about 22.6 MB, so it fits.

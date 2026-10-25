@@ -26,7 +26,7 @@ object Sfx {
         val p = pool ?: return
         ids.values.forEach { p.unload(it) }
         ids.clear()
-        for (n in listOf("move", "select", "back", "unlock")) {
+        for (n in listOf("move", "select", "back", "unlock", "tab", "open", "close", "on", "off")) {
             val f = File(ctx.filesDir, "sfx/$n")
             try {
                 ids[n] = if (f.exists()) p.load(f.path, 1) else p.load(ctx.assets.openFd("sfx/$n.wav"), 1)

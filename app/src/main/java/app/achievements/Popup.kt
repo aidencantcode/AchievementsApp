@@ -41,15 +41,20 @@ object Popup {
         val opacity: Int, val scale: Int, val style: String, val font: File?
     )
 
-    private class Sheen(ctx: Context) : View(ctx) {
+    // The card draws its own sheen, clipped to its bounds, so it can never spill outside the box.
+    private class Card(ctx: Context) : LinearLayout(ctx) {
         var t = -1f
         private val paint = Paint()
-        override fun onDraw(c: Canvas) {
-            if (t < 0f || t > 1f) return
+        override fun dispatchDraw(c: Canvas) {
+            super.dispatchDraw(c)
+            if (t < 0f || t > 1f || width == 0) return
+            c.save()
+            c.clipRect(0, 0, width, height)
             val w = width.toFloat()
             val x = -w * 0.4f + t * w * 1.8f
             paint.shader = LinearGradient(x, 0f, x + w * 0.35f, height * 0.6f, intArrayOf(0x00FFFFFF, 0x40FFFFFF, 0x00FFFFFF), floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
             c.drawRect(0f, 0f, w, height.toFloat(), paint)
+            c.restore()
         }
     }
 
@@ -75,10 +80,13 @@ object Popup {
         val wm = ctx.getSystemService(WindowManager::class.java)
         val d = ctx.resources.displayMetrics.density * cfg.scale / 100f
         fun dp(x: Int) = (x * d).toInt()
-        val base = cfg.font?.let { try { Typeface.createFromFile(it) } catch (e: Exception) { null } } ?: Typeface.DEFAULT
+        val custom = cfg.font?.let { try { Typeface.createFromFile(it) } catch (e: Exception) { null } }
+        val headTf = custom?.let { Typeface.create(it, Typeface.BOLD) }
+            ?: try { Typeface.createFromAsset(ctx.assets, "fonts/Gilroy-ExtraBold.otf") } catch (e: Exception) { Typeface.DEFAULT_BOLD }
+        val bodyTf = custom ?: try { Typeface.createFromAsset(ctx.assets, "fonts/ARIALBD.TTF") } catch (e: Exception) { Typeface.DEFAULT }
         fun tv(t: String, sp: Float, color: Long, bold: Boolean) = TextView(ctx).apply {
             text = t; setTextSize(TypedValue.COMPLEX_UNIT_PX, sp * d); setTextColor(color.toInt())
-            typeface = if (bold) Typeface.create(base, Typeface.BOLD) else base
+            typeface = if (bold) headTf else bodyTf
         }
         val r = dp(cfg.radius).toFloat()
         val solid = cfg.style == "solid"
@@ -86,7 +94,7 @@ object Popup {
         var a = (cfg.opacity * 255 / 100).coerceIn(30, 255)
         if (!solid && !blurOk && a < 215) a = 215 // no blur available: keep text readable
         val bg: android.graphics.drawable.Drawable = when (cfg.style) {
-            "solid" -> GradientDrawable().apply { setColor(0xFF1F252D.toInt()); cornerRadius = r }
+            "solid" -> GradientDrawable().apply { setColor(0xFF1B2028.toInt()); cornerRadius = r }
             "glass" -> GradientDrawable().apply {
                 setColor(android.graphics.Color.argb(a, 16, 22, 30)); cornerRadius = r
                 setStroke(maxOf(1, dp(1)), android.graphics.Color.argb(80, 255, 255, 255))
@@ -99,7 +107,7 @@ object Popup {
                 LayerDrawable(arrayOf(border, fill, spec)).apply { setLayerInset(1, i, i, i, i); setLayerInset(2, i, i, i, i) }
             }
         }
-        val card = LinearLayout(ctx).apply {
+        val card = Card(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(dp(12), dp(12), dp(18), dp(12))
@@ -107,29 +115,26 @@ object Popup {
         }
         val img = ImageView(ctx).apply {
             scaleType = ImageView.ScaleType.CENTER_CROP
-            background = GradientDrawable().apply { setColor(0xFF38414D.toInt()); cornerRadius = dp(8).toFloat() }
+            background = GradientDrawable().apply { setColor(0xFF27303A.toInt()) }
             clipToOutline = true
             if (icon != null) setImageBitmap(icon)
         }
         card.addView(img, LinearLayout.LayoutParams(dp(48), dp(48)).apply { rightMargin = dp(12) })
         val col = LinearLayout(ctx).apply { orientation = LinearLayout.VERTICAL }
-        col.addView(tv("ACHIEVEMENT UNLOCKED", 10f, 0xFF6CC4FFL, true).apply { letterSpacing = 0.08f })
+        col.addView(tv("ACHIEVEMENT UNLOCKED", 10f, 0xFF1A9EFFL, true).apply { letterSpacing = 0.08f })
         col.addView(tv(name, 15f, 0xFFF2F5F8L, true).apply { maxLines = 2 })
         if (desc.isNotBlank()) col.addView(tv(desc, 12f, 0xFFB4BEC9L, false).apply { maxLines = 2 })
         card.addView(col)
-        val sheen = Sheen(ctx)
-        val root = FrameLayout(ctx).apply {
-            addView(card, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT))
-            if (cfg.style == "liquid") addView(sheen, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
-            outlineProvider = object : ViewOutlineProvider() {
+        if (r > 0f) {
+            card.outlineProvider = object : ViewOutlineProvider() {
                 override fun getOutline(v: View, o: Outline) { o.setRoundRect(0, 0, v.width, v.height, r) }
             }
-            clipToOutline = true
+            card.clipToOutline = true
         }
         val maxW = minOf(ctx.resources.displayMetrics.widthPixels - dp(32), dp(360))
-        root.measure(View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.AT_MOST), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
-        val w = root.measuredWidth
-        val hh = root.measuredHeight
+        card.measure(View.MeasureSpec.makeMeasureSpec(maxW, View.MeasureSpec.AT_MOST), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED))
+        val w = card.measuredWidth
+        val hh = card.measuredHeight
         val lp = WindowManager.LayoutParams(
             w, hh, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
@@ -152,10 +157,10 @@ object Popup {
         val hidden = -(if (vertical) hh else w) - dp(8)
         fun place(v: Int) {
             if (vertical) lp.y = v else lp.x = v
-            try { wm.updateViewLayout(root, lp) } catch (e: Exception) { }
+            try { wm.updateViewLayout(card, lp) } catch (e: Exception) { }
         }
         if (vertical) lp.y = hidden else { lp.x = hidden; lp.y = sb + dp(16) }
-        wm.addView(root, lp)
+        wm.addView(card, lp)
         Sfx.play("unlock")
 
         fun move(from: Int, to: Int, ms: Long, end: () -> Unit) {
@@ -169,13 +174,13 @@ object Popup {
         }
         if (cfg.style == "liquid") ValueAnimator.ofFloat(0f, 1f).apply {
             duration = 1100; startDelay = 250
-            addUpdateListener { sheen.t = it.animatedValue as Float; sheen.invalidate() }
+            addUpdateListener { card.t = it.animatedValue as Float; card.invalidate() }
             start()
         }
         move(hidden, shown, 380) {
             h.postDelayed({
                 move(shown, hidden, 300) {
-                    try { wm.removeView(root) } catch (e: Exception) { }
+                    try { wm.removeView(card) } catch (e: Exception) { }
                     next()
                 }
             }, cfg.secs * 1000L)

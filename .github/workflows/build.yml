@@ -15,10 +15,6 @@ jobs:
         with: { distribution: temurin, java-version: 17 }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: "8.7" }
-      - name: Fetch Inter font (optional, app falls back to system font)
-        run: |
-          mkdir -p app/src/main/assets/fonts
-          curl -L --fail -o app/src/main/assets/fonts/Inter.ttf "https://github.com/google/fonts/raw/main/ofl/inter/Inter%5Bopsz%2Cwght%5D.ttf" || rm -f app/src/main/assets/fonts/Inter.ttf
       - name: Set version
         run: echo "VERSION=1.0.${{ github.run_number }}" >> "$GITHUB_ENV"
       - name: Build APK

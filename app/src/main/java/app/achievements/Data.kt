@@ -23,8 +23,8 @@ class Prefs(c: Context) {
         get() = sp.getString("skey", "") ?: ""
         set(v) { sp.edit().putString("skey", v).apply() }
     var popupRadius: Int
-        get() = sp.getInt("pr", 18)
-        set(v) { sp.edit().putInt("pr", v).apply() }
+        get() = sp.getInt("pr2", 0)
+        set(v) { sp.edit().putInt("pr2", v).apply() }
     var popupBlur: Int
         get() = sp.getInt("pb", 24)
         set(v) { sp.edit().putInt("pb", v).apply() }
@@ -64,7 +64,7 @@ data class Ach(
 data class Game(
     val dir: DocumentFile, val appId: String, val title: String, val achs: List<Ach>,
     val progress: DocumentFile?, val cover: Uri?, val hero: Uri?,
-    val metaAt: Long, val metaSchema: Boolean
+    val metaAt: Long, val metaSchema: Boolean, val metaPage: Boolean
 ) {
     val earned: Int get() = achs.count { it.earned }
 }
@@ -138,7 +138,7 @@ object Scanner {
             ?: m?.groupValues?.get(2)?.ifBlank { null } ?: folder
         return Game(
             dir, appId, title, achs, progressDoc, kids["cover.jpg"]?.uri, kids["hero.jpg"]?.uri,
-            meta?.optLong("at") ?: 0L, meta?.optBoolean("s") ?: false
+            meta?.optLong("at") ?: 0L, meta?.optBoolean("s") ?: false, meta?.optBoolean("pg") ?: false
         )
     }
 }
@@ -183,31 +183,22 @@ object Net {
 
     private fun norm(s: String) = s.lowercase().filter { it.isLetterOrDigit() }
 
-    private fun clean(s: String) = s.replace(Regex("<[^>]*>"), "")
-        .replace("&amp;", "&").replace("&quot;", "\"").replace("&#39;", "'")
-        .replace("&lt;", "<").replace("&gt;", ">").trim()
-
-    // Keyless fallback: Steam's public global-stats page lists every achievement with icon, name,
-    // description and percentage. Entries are matched to the definitions file by display name.
+    // Keyless fallback: names, descriptions, icons and percentages from Steam's public page, matched by display name.
     private fun page(c: Context, g: Game, ach: JSONObject): Boolean {
-        val html = get("https://steamcommunity.com/stats/${g.appId}/achievements?l=english")?.let { String(it) } ?: return false
-        val rows = html.split("class=\"achieveRow")
-        if (rows.size < 2) return false
+        val html = get("https://steamcommunity.com/achievements/${g.appId}?l=english")?.let { String(it) } ?: return false
+        val rows = Gbe.rows(html, g.appId)
+        if (rows.isEmpty()) return false
         val byName = g.achs.associateBy { norm(it.name) }
         val icons = g.dir.findFile("icons") ?: g.dir.createDirectory("icons")
         var hits = 0
-        for (r in rows.drop(1)) {
-            val n = Regex("<h3[^>]*>(.*?)</h3>", RegexOption.DOT_MATCHES_ALL).find(r)?.groupValues?.get(1)?.let { clean(it) } ?: continue
-            val a = byName[norm(n)] ?: continue
-            val desc = Regex("<h5[^>]*>(.*?)</h5>", RegexOption.DOT_MATCHES_ALL).find(r)?.groupValues?.get(1)?.let { clean(it) } ?: ""
-            val pct = Regex("achievePercent[^>]*>\\s*([0-9.]+)%").find(r)?.groupValues?.get(1)?.toDoubleOrNull()
-            val img = Regex("<img[^>]+src=\"([^\"]+)\"").find(r)?.groupValues?.get(1)
+        for (r in rows) {
+            val a = byName[norm(r.name)] ?: continue
             val s = ach.optJSONObject(a.id) ?: JSONObject().also { ach.put(a.id, it) }
-            if (desc.isNotBlank()) s.put("d", desc)
-            if (pct != null && !s.has("p")) s.put("p", pct)
-            if (img != null && icons != null) {
+            if (r.desc.isNotBlank()) s.put("d", r.desc)
+            if (r.pct != null && !s.has("p")) s.put("p", r.pct)
+            if (icons != null) {
                 val fn = "icon_" + a.id.replace(Regex("[^A-Za-z0-9_.-]"), "_") + ".jpg"
-                if (icons.findFile(fn) == null) get(img)?.let { bytes -> save(c, icons, fn, bytes) }
+                if (icons.findFile(fn) == null) get(r.img)?.let { bytes -> save(c, icons, fn, bytes) }
                 s.put("i", fn)
             }
             hits++
@@ -217,6 +208,7 @@ object Net {
 
     fun needsMeta(g: Game, steamKey: String): Boolean =
         g.appId.isNotBlank() && (g.metaAt == 0L || System.currentTimeMillis() - g.metaAt > 7 * 86400000L ||
+            (!g.metaPage && System.currentTimeMillis() - g.metaAt > 10 * 60000L) ||
             (steamKey.isNotBlank() && !g.metaSchema))
 
     // Global unlock percentages (no key needed). With a Steam Web API key: names, descriptions and icons too.
@@ -262,7 +254,7 @@ object Net {
         if (!schema) pageOk = page(c, g, ach)
         if (!gotPct && !schema && !pageOk) return
         if (!schema && g.metaSchema) return // keep the richer file we already have
-        val root = JSONObject().put("at", System.currentTimeMillis()).put("s", schema).put("ach", ach)
+        val root = JSONObject().put("at", System.currentTimeMillis()).put("s", schema).put("pg", pageOk).put("ach", ach)
         save(c, g.dir, "meta.json", root.toString().toByteArray())
     }
 }
