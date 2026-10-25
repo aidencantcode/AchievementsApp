@@ -114,7 +114,7 @@ object Gbe {
             val chunks = Regex(">([^<>]+)<").findAll(">$seg<").map { dec(it.groupValues[1]).trim() }.filter { it.isNotEmpty() }.toList()
             val k = chunks.indexOfFirst { it.matches(Regex("\\d+(\\.\\d+)?%")) }
             val body = if (k >= 0) chunks.take(k) else chunks.take(2)
-            val name = alt.ifBlank { body.firstOrNull() ?: continue }
+            val name = if (alt.isNotBlank()) alt else (body.firstOrNull() ?: continue)
             val desc = body.filter { it != name && it != alt }.joinToString(" ")
             out += PageRow(name, desc, if (k >= 0) chunks[k].removeSuffix("%").toDoubleOrNull() else null, src)
         }
